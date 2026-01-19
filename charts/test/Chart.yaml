@@ -1,0 +1,36 @@
+## @param apiVersion
+apiVersion: v2
+
+## @param name
+name: test
+
+## @param description
+description: Shared functions/templates for helm charts
+
+## @param version
+## @param appVersion
+version: 1.0.0
+appVersion: 1.0.0
+
+## @param type
+type: library
+
+## @param keywords
+keywords:
+  - common
+  - helper
+  - template
+  - function
+  - ethalium
+
+## @param sources
+sources:
+  - https://github.com/ethalium-charts/test
+
+## @param maintainers
+maintainers:
+  - name: marxlnfcs
+    url: https://github.com/marxlnfcs
+
+## @param annotations
+annotations: {}
