@@ -1,0 +1,193 @@
+## Defines the name of the workflow
+##
+name: "Release Helm chart"
+
+## Defines when the workflow should be started
+##
+on:
+  push:
+    branches: ["main"]
+    paths:
+    - ".github/workflows/**"
+    - "charts/**"
+  
+## Defines the permissions of the workflow
+##
+permissions:
+  contents: read
+
+## Concurrency settings
+##
+concurrency:
+  group: publish-${{ github.repository }}
+  cancel-in-progress: true
+
+## Jobs
+##
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      TARGET_REPO: "ethalium-charts/ethalium-charts.github.io"
+      TARGET_REF: "main"
+      TARGET_TOKEN: ${{ secrets.REPOSITORY_TOKEN }}
+      TARGET_DIR: "packages"
+      SOURCE_DIR: "charts"
+
+    steps:
+
+      ## Checkout repository
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      ## Install helm
+      - name: Install helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.14.4
+
+      ## Detect charts
+      - name: Detect charts
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          charts=()
+          for d in "${SOURCE_DIR}"/*; do
+            if [ -d "$d" ] && [ -f "$d/Chart.yaml" ]; then
+              charts+=("$(basename "$d")")
+            fi
+          done
+
+          if [ ${#charts[@]} -eq 0 ]; then
+            echo "No charts found under ${SOURCE_DIR}/ (need ${SOURCE_DIR}/*/Chart.yaml)"
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Found charts: ${charts[*]}"
+          echo "found=true" >> "$GITHUB_OUTPUT"
+          echo "charts=${charts[*]}" >> "$GITHUB_OUTPUT"
+
+      ## Checkout charts repository
+      - name: Checkout charts repository
+        if: steps.detect.outputs.found == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.TARGET_REF }}
+          token: ${{ env.TARGET_TOKEN }}
+          path: target
+
+      ## Configure git identity
+      - name: Configure git identity for charts repository
+        if: steps.detect.outputs.found == 'true'
+        working-directory: target
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name  "EthaliumCharts Bot"
+          git config user.email "ethalium-charts-bot@users.noreply.github.com"
+
+      ## Package and commit charts individually
+      - name: Package and commit charts individually
+        if: steps.detect.outputs.found == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          
+          short_sha="${GITHUB_SHA:0:7}"
+
+          for chart in ${{ steps.detect.outputs.charts }}; do
+            chart_dir="${SOURCE_DIR}/${chart}"
+
+            echo "=============================="
+            echo "Processing chart: ${chart_dir}"
+
+            # extract name from Chart.yaml
+            name=$(awk -F': *' '$1=="name"{print $2; exit}' "${chart_dir}/Chart.yaml" | tr -d '"' | tr -d "'")
+            if [ -z "${name}" ]; then
+              echo "ERROR: Could not read 'name' from ${chart_dir}/Chart.yaml"
+              exit 1
+            fi
+
+            # extract version from Chart.yaml
+            version=$(awk -F': *' '$1=="version"{print $2; exit}' "${chart_dir}/Chart.yaml" | tr -d '"' | tr -d "'")
+            if [ -z "${version}" ]; then
+              echo "ERROR: Could not read 'version' from ${chart_dir}/Chart.yaml"
+              exit 1
+            fi
+
+            # prepare package
+            helm dependency update "${chart_dir}" || true
+            helm lint "${chart_dir}"
+
+            # helm package output filename is typically <name>-<version>.tgz (name from Chart.yaml)
+            pkg_path=$(helm package "${chart_dir}" -d out | awk -F': ' '{print $2}' | tail -n 1)
+            if [ -z "${pkg_path}" ] || [ ! -f "${pkg_path}" ]; then
+              echo "ERROR: Package not created for ${chart}"
+              exit 1
+            fi
+
+
+            # copy package to charts repository
+            pkg_file="$(basename "${pkg_path}")"
+            mkdir -p "target/${TARGET_DIR}/${name}"
+            cp -v "${pkg_path}" "target/${TARGET_DIR}/${name}/${pkg_file}"
+
+            # create commit message
+            commit_msg_file="$(mktemp)"
+            cat > "${commit_msg_file}" <<EOF
+          release(${chart}): ${version}
+
+          Chart:
+          -------------
+          chart-name: ${chart}
+          chart-version: ${version}
+          chart-path: ${chart_dir}
+
+          Source:
+          -------------
+          source-name: ${GITHUB_REPOSITORY}
+          source-repository: https://github.com/${GITHUB_REPOSITORY}
+          source-sha: ${GITHUB_SHA}
+          source-commit: https://github.com/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}
+
+          Workflow:
+          -------------
+          workflow-run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          EOF
+
+            # commit only this file (one commit per chart)
+            pushd target >/dev/null
+              git add "${TARGET_DIR}/${name}/${pkg_file}"
+
+              if git diff --cached --quiet; then
+                echo "No changes for ${chart} (${pkg_file}). Skipping."
+                rm -f "${TARGET_DIR:?}/${name}/${pkg_file}"
+              else
+                git commit -F "${commit_msg_file}"
+                rm -f "${commit_msg_file}"
+              fi
+            popd >/dev/null
+
+          done
+
+      ## Push all commits to charts repository
+      - name: Push all commits to charts repository
+        if: steps.detect.outputs.found == 'true'
+        working-directory: target
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/${TARGET_REF})" ]; then
+            git push
+          else
+            echo "No commits detected. Skipping."
+          fi
