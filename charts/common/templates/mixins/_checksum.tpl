@@ -5,7 +5,7 @@
     Mixin to generate a checksum from a template.
 
     ------ USAGE ------
-    {{ include "common.mixins.template.checksum" (list "/configmap.yaml" .) }}
+    {{ include "common.mixins.template.checksum" (list . "/configmap.yaml") }}
 
     ------ OUTPUT ------
     <sha512>
@@ -13,8 +13,8 @@
     -----------------------------------------------------------------------------------
 */}}
 {{- define "common.mixins.template.checksum" }}
-    {{- $template := index . 0 }}
-    {{- $root := index . 1 }}
+    {{- $root := index . 0 }}
+    {{- $template := index . 1 }}
     {{- include (print $root.Template.BasePath $template) $root | sha256sum }}
 {{- end }}
 
